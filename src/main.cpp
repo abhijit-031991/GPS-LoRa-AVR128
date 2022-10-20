@@ -53,11 +53,12 @@ time_t act_start;                 // activity mode start time
 time_t act_end;                   // activity mode end time
 
 // Time Variables // 
-time_t strtTime;
-time_t act_end_time;
-time_t next_gps_wakeup;
-time_t next_ping_wakeup;
-time_t schedule_user_provided; 
+time_t strtTime;                  //** Start Time Acquired by GPS on Start Up
+time_t next_gps_wakeup;           //** Internal GPS Time Setting
+time_t next_ping_wakeup;          //** Internal Ping Time Setting
+time_t schedule_user_provided;    //>>> Schedule Mode Wake Time provided by user
+time_t schedule_sys_generated;    //** Time variable used to store the next scheduled wake up time
+time_t last_act_trigger;          //** Variable to store last activity trigger time
 
 // Booleans and Flags //
 bool act_int_triggered = false;   //** Flag to identify activity trigger
@@ -67,6 +68,7 @@ bool act_mode = false;            //** Activity mode status - is device in activ
 bool activity_enabled = false;    //>>> Enables or diables activity mode
 bool wipe_memory = false;         //>>> Wipe memory during reset/Activation
 bool scheduled = false;           //>>> Flag to enable scheduling mode
+bool window = false;              //** Flag to identify if device is in scheduled time window
 
 // Radio Variables //
 int radioFrequency = 1;           //Frequency of Pings in minutes *** USER CONFIG ***
@@ -527,7 +529,7 @@ void activationPing(){
 void mortalityCheck(bool m){
   if (m == true)
   {
-    if (act_end_time > act_end_time + 86400)
+    if (last_act_trigger > last_act_trigger + 86400)
     {
       mortality = true; 
     }    
@@ -612,10 +614,128 @@ void setup(){
   //***********************************************//
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
   sleep_enable();
+  sleep_cpu();
 }
 
 // Loop : Main Loop
 void loop(){
-    
+  Serial.println(F("AWAKE"));
+  //**************************************************************//
+  if(act_int_triggered == true){
+    if(acce.actDetected()){
+    Serial.println(F("*** ACTIVITY ***")); 
+    digitalWrite(RTC_PIN, HIGH);
+    act_start = rtc.get();
+    last_act_trigger = act_start + (act_duration*60);
+    Serial.println(act_start);
+    rtc.setAlarm(0, act_start + 10);
+    next_gps_wakeup = act_start + 10;
+    rtc.alarmPolarity(HIGH);
+    digitalWrite(RTC_PIN, LOW);
+    rtc.enableAlarm(0, ALM_MATCH_DATETIME);
+    act_end = act_start + act_duration*60;  
+    act_mode = true; 
+    mortality = false; 
+    }            
+    attachInterrupt(digitalPinToInterrupt(AINT1), aisr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(RINT), risr, CHANGE);
+    delay(1000);
+  }
+  //**************************************************************//
+  if (rtc_int_triggered == true)
+  {
+    digitalWrite(RTC_PIN, HIGH);
+    if(rtc.alarm(0)){
+      Serial.println(F("ALARM 0"));
+      time_t prevTime = rtc.get();
+      if (act_mode == true && prevTime >= act_end)
+      {
+        act_mode = false;
+        Serial.println(F("ACTIVITY MODE ENDING"));
+      }      
+      Serial.println(rtc.get());
+      delay(10);
+      rtc.alarmPolarity(HIGH);
+      if (act_mode ==true)
+      {
+        rtc.setAlarm(0, next_gps_wakeup + 60*act_gpsFrequency);
+        next_gps_wakeup = next_gps_wakeup + 60*act_gpsFrequency;
+      }else{
+        rtc.setAlarm(0, next_gps_wakeup + 60*gpsFrequency);
+        next_gps_wakeup = next_gps_wakeup + 60*gpsFrequency;
+      }      
+      rtc.enableAlarm(0, ALM_MATCH_DATETIME);
+      recGPS();
+      ////////////////////////////////////////////////
+      prevTime = rtc.get();
+      if(scheduled == true){
+        if (window == true)
+        {
+          rtc.alarmPolarity(HIGH);      
+          rtc.setAlarm(1, prevTime + 60*radioFrequency); // Add if statement for sch Mode
+          next_ping_wakeup = prevTime + 60*radioFrequency;    
+          rtc.enableAlarm(1, ALM_MATCH_DATETIME);
+        }
+      }else{
+        rtc.alarmPolarity(HIGH);      
+        rtc.setAlarm(1, prevTime + 60*radioFrequency); // Add if statement for sch Mode
+        next_ping_wakeup = prevTime + 60*radioFrequency;    
+        rtc.enableAlarm(1, ALM_MATCH_DATETIME);
+      }      
+         
+      /////////////////////////////////////////////// 
+    }
+    if(rtc.alarm(1)){
+      Serial.println(F("ALARM 1"));
+      Serial.println(rtc.get());
+      delay(10);
+      if (scheduled == false)
+      {
+        Serial.println(F("Normal Ping Mode"));  
+        rtc.alarmPolarity(HIGH);
+        rtc.setAlarm(1, next_ping_wakeup + 60*radioFrequency);
+        next_ping_wakeup = next_ping_wakeup + 60*radioFrequency;
+      } 
+
+      if (scheduled == true && window == false)
+      {
+        Serial.println(F("Entering Scheduled Mode"));
+        scheduled_wake_start = rtc.get();
+        scheduled_wake_end = scheduled_wake_start + sch_duration*60;
+        schedule_sys_generated = scheduled_wake_start + 86400*sch_rpt_duration;
+        Serial.print(F("Next Schedule Mode:")); Serial.println(schedule_sys_generated);
+        window = true;
+        next_ping_wakeup = scheduled_wake_start;
+        delay(50);
+      }
+      if (scheduled == true && window == true)
+      {
+        time_t n = rtc.get();
+        if (n >= scheduled_wake_end)
+        {
+          Serial.println(F("Exiting Scheduled Mode"));
+          window = false;
+          rtc.setAlarm(1, schedule_sys_generated);
+        }else{
+          rtc.setAlarm(1, next_ping_wakeup + 60*radioFrequency);
+          next_ping_wakeup = next_ping_wakeup + 60*radioFrequency;
+          Serial.println(next_ping_wakeup);
+        }        
+      }
+      rtc.enableAlarm(1, ALM_MATCH_DATETIME);
+      Serial.print(F("GPSTime :")); Serial.println(next_gps_wakeup);
+      Ping(lat,lng,tag, cnt, devType, mortality);
+      receive(rcv_duration*1000);       
+    }
+    digitalWrite(RTC_PIN, LOW);
+    //**************************************************************//
+    attachInterrupt(digitalPinToInterrupt(AINT1), aisr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(RINT), risr, CHANGE);
+  }
+  //**************************************************************//
+  sleep_cpu();
 }
 
+//********************************************************************//
+//************************* END OF CODE ******************************//
+//********************************************************************//
