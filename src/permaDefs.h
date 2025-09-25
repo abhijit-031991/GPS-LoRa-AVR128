@@ -6,7 +6,7 @@
 
 // Device ID //
 
-const uint16_t tag = 11111;
+const uint16_t tag = 10401;
 const uint8_t devType = 107;
 
 // Firmware Version //
